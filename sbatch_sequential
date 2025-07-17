@@ -1,0 +1,12 @@
+#!/bin/bash
+#SBATCH -J mtrx_mult_sequential_test
+#SBATCH -o mm_seq_%j.out
+#SBATCH -e mm_seq_%j.err
+#SBATCH --mail-user filippo.mazzarotto@studenti.unipd.it
+#SBATCH --mail-type ALL
+#SBATCH -n 1
+#SBATCH -p allgroups
+#SBATCH -t 00:05:00
+#SBATCH --mem 5G
+cd $SLURM_SUBMIT_DIR
+mpirun -np $SLURM_NTASKS ./mm_seq.out
