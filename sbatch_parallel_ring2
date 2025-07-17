@@ -1,0 +1,12 @@
+#!/bin/bash
+#SBATCH -J mm_ring_2
+#SBATCH -o runs/mm_par_%j.out
+#SBATCH -e runs/mm_par_%j.err
+#SBATCH --mail-user filippo.mazzarotto@studenti.unipd.it
+#SBATCH --mail-type ALL
+#SBATCH -n 9
+#SBATCH -p allgroups
+#SBATCH -t 00:10:00
+#SBATCH --mem 1G
+cd $SLURM_SUBMIT_DIR
+mpirun -np $SLURM_NTASKS ./mm_par_ring.out
