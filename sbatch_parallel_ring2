@@ -4,9 +4,9 @@
 #SBATCH -e runs/mm_par_%j.err
 #SBATCH --mail-user filippo.mazzarotto@studenti.unipd.it
 #SBATCH --mail-type ALL
-#SBATCH -n 9
+#SBATCH -n 32
 #SBATCH -p allgroups
 #SBATCH -t 00:10:00
-#SBATCH --mem 1G
+#SBATCH --mem 10G
 cd $SLURM_SUBMIT_DIR
 mpirun -np $SLURM_NTASKS ./mm_par_ring.out

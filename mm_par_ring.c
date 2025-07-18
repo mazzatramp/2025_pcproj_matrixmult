@@ -6,6 +6,20 @@
 
 #define MATRIX_RAND_MAX 10
 
+typedef struct {
+    MPI_Comm comm;
+    int size;
+    int curr;
+} Processes;
+
+int next(Processes procs) {
+    return (procs.curr + 1) % procs.size;;
+}
+
+int prev(Processes procs) {
+    return (procs.curr - 1 + procs.size) % procs.size;
+}
+
 void fill_rand(int *data, int len) {
     for (int i = 0; i < len; i++) {
         data[i] = rand() % MATRIX_RAND_MAX;
@@ -26,88 +40,90 @@ int compute_cell(int* row, int* col, int len) {
     return sum;
 }
 
-int print_arr(int* a, int len) {
+void print_array(int* a, int len) {
     for (int i=0; i<len; ++i) {
         printf("%d ",a[i]);
     }
     printf("\n");
 }
 
-void chain_array_print(int rank, int *a, int len, char prefix) {
-    MPI_Barrier(MPI_COMM_WORLD);
-    MPI_Status status;
+void signal_next(Processes procs) {
+    MPI_Send(NULL, 0, MPI_INT, next(procs), 0, procs.comm);
+}
 
-    const int next = (rank+1)%len;
-    const int prev = (rank-1)<0 ? len-1 : rank-1;
+void wait_prev(Processes procs) {
+    MPI_Recv(NULL, 0, MPI_INT, prev(procs), 0, procs.comm, MPI_STATUS_IGNORE);
+}
 
-    if (rank == 0) {
-        printf("%c%d: ", prefix, rank);
-        print_arr(a, len);
-        MPI_Send(NULL, 0, MPI_INT, next, 0, MPI_COMM_WORLD);
+void chain_array_print(char *prefix, int *arr, int len, Processes procs) {
+    // IMPORTANT: Without this barrier, last process might print the last elemnt
+    // of the array after the first process started printing another array
+    MPI_Barrier(procs.comm); 
+
+    if (procs.curr == 0) {
+        printf("%s%d: ", prefix, procs.curr);
+        print_array(arr, len);
     } else {
-        MPI_Recv(NULL, 0, MPI_INT, prev, 0, MPI_COMM_WORLD, &status);
-        printf("%c%d: ", prefix, rank);
-        print_arr(a, len);
-        if (rank != len -1) {
-            MPI_Send(NULL, 0, MPI_INT, next, 0, MPI_COMM_WORLD);
-        }
+        wait_prev(procs);
+        printf("%s%d: ", prefix, procs.curr);
+        print_array(arr, len);
     }
-    MPI_Barrier(MPI_COMM_WORLD);
+
+    // Check if this process' next wraps around to the start.
+    // Using next() ensures compatiblity with other chaing topologies, assuming 0 is always the first process
+    if (next(procs) > 0) {
+        signal_next(procs);
+    }
+}
+
+Processes init(int argc, char **argv) {
+    Processes procs;
+    procs.comm = MPI_COMM_WORLD;
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(procs.comm, &procs.curr);
+    MPI_Comm_size(procs.comm, &procs.size);
+    srand(time(NULL) + procs.curr * 2435); // Different seed for each process
+    return procs;
+}
+
+void carousel_left_step(int **main_mem, int **recv_buffer, int len, Processes procs) {
+
+    MPI_Sendrecv(
+        *main_mem, len, MPI_INT, prev(procs), 0, //send to previous
+        *recv_buffer, len, MPI_INT, next(procs), 0, //recv from next
+        procs.comm, MPI_STATUS_IGNORE
+    );
+
+    swap_ptrs(main_mem, recv_buffer);
 }
 
 int main(int argc, char **argv) {
-    MPI_Init(&argc, &argv);
-    int my_rank, n_procs;
-    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &n_procs);
-    MPI_Status status;
 
-    //random seed different for each process
-    srand(time(NULL) + my_rank * 2435); //unimportant magic number
+    Processes procs = init(argc, argv);
 
-    const int next = (my_rank+1) % n_procs;
-    const int prev = (my_rank-1)<0 ? n_procs-1 : my_rank-1;
+    const int matrix_size = procs.size;
+    int *rowA = (int*)malloc(matrix_size * sizeof(int));
+    int *colB = (int*)malloc(matrix_size * sizeof(int));
+    int *colC = (int*)malloc(matrix_size * sizeof(int));
+    int *buffer = (int*)malloc(matrix_size * sizeof(int));
 
-    // The assumpion is that n_procs = rows = cols
+    fill_rand(rowA, matrix_size);
+    fill_rand(colB, matrix_size);
 
-    int *columnB = (int*)malloc(n_procs * sizeof(int));
-    int *rowA = (int*)malloc(n_procs * sizeof(int));
-    int *buffer = (int*)malloc(n_procs * sizeof(int));
+    int row = procs.curr;
+    do {
+        colC[row] = compute_cell(colB, rowA, matrix_size);
+        carousel_left_step(&rowA, &buffer, matrix_size, procs);
+        row = (row + 1) % matrix_size;
+    } while (row != procs.curr);
 
-    fill_rand(columnB, n_procs);
-    fill_rand(rowA, n_procs);
-
-    if (my_rank == 0) {
-        printf("Matrix A:\n");
-    }
-    chain_array_print(my_rank, rowA, n_procs, 'A');
-    if (my_rank == 0) {
-        printf("Matrix B:\n");
-    }
-    chain_array_print(my_rank, columnB, n_procs, 'B');
-    int *columnC = (int*)malloc(n_procs * sizeof(int));
-
-    for (int step = 0; step < n_procs; step++) {
-        int i_row = (my_rank + step) % n_procs;
-        columnC[i_row] = compute_cell(columnB, rowA, n_procs);
-
-        MPI_Sendrecv(
-            rowA, n_procs, MPI_INT, next, 0, //send
-            buffer, n_procs, MPI_INT, prev, 0, //recv
-            MPI_COMM_WORLD, &status
-        );
-
-        swap_ptrs(&rowA, &buffer);
-    }
-
-    if (my_rank == 0) {
-        printf("Matrix C:\n");
-    }
-    chain_array_print(my_rank, columnC, n_procs, 'C');
+    chain_array_print("A", rowA, matrix_size, procs);
+    chain_array_print("B", colB, matrix_size, procs);
+    chain_array_print("C", colC, matrix_size, procs);
 
     free(rowA);
-    free(columnB);
-    free(columnC);
+    free(colB);
+    free(colC);
     free(buffer);
 
     MPI_Finalize();
