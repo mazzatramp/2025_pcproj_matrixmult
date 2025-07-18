@@ -5,23 +5,24 @@
 #include <time.h>
 
 #define MATRIX_RAND_MAX 10
+#define SEED_PROCESS_BIAS 2435 // Bias to ensure much different seeds for each process
 
 typedef struct {
     MPI_Comm comm;
     int size;
-    int curr;
+    int myrank;
 } Processes;
 
 int next(Processes procs) {
-    return (procs.curr + 1) % procs.size;;
+    return (procs.myrank + 1) % procs.size;;
 }
 
 int prev(Processes procs) {
-    return (procs.curr - 1 + procs.size) % procs.size;
+    return (procs.myrank - 1 + procs.size) % procs.size;
 }
 
-void fill_rand(int *data, int len) {
-    for (int i = 0; i < len; i++) {
+void fill_rand(int *data, size_t len) {
+    for (size_t i = 0; i < len; i++) {
         data[i] = rand() % MATRIX_RAND_MAX;
     }
 }
@@ -32,15 +33,15 @@ void swap_ptrs(int **a, int **b) {
     *b = c; 
 }
 
-int compute_cell(int* row, int* col, int len) {
+int compute_cell(int* row, int* col, size_t len) {
     int sum = 0;
-    for (int i=0; i<len; ++i) {
+    for (size_t i=0; i<len; ++i) {
         sum += row[i]*col[i];
     }
     return sum;
 }
 
-void print_array(int* a, int len) {
+void print_array(int* a, size_t len) {
     for (int i=0; i<len; ++i) {
         printf("%d ",a[i]);
     }
@@ -60,18 +61,18 @@ void chain_array_print(char *prefix, int *arr, int len, Processes procs) {
     // of the array after the first process started printing another array
     MPI_Barrier(procs.comm); 
 
-    if (procs.curr == 0) {
-        printf("%s%d: ", prefix, procs.curr);
+    if (procs.myrank == 0) {
+        printf("%s%d: ", prefix, procs.myrank);
         print_array(arr, len);
     } else {
         wait_prev(procs);
-        printf("%s%d: ", prefix, procs.curr);
+        printf("%s%d: ", prefix, procs.myrank);
         print_array(arr, len);
     }
 
     // Check if this process' next wraps around to the start.
     // Using next() ensures compatiblity with other chaing topologies, assuming 0 is always the first process
-    if (next(procs) > 0) {
+    if (next(procs) != 0) {
         signal_next(procs);
     }
 }
@@ -80,13 +81,13 @@ Processes init(int argc, char **argv) {
     Processes procs;
     procs.comm = MPI_COMM_WORLD;
     MPI_Init(&argc, &argv);
-    MPI_Comm_rank(procs.comm, &procs.curr);
+    MPI_Comm_rank(procs.comm, &procs.myrank);
     MPI_Comm_size(procs.comm, &procs.size);
-    srand(time(NULL) + procs.curr * 2435); // Different seed for each process
+    srand(time(NULL) + procs.myrank * SEED_PROCESS_BIAS); // Different seed for each process
     return procs;
 }
 
-void carousel_left_step(int **main_mem, int **recv_buffer, int len, Processes procs) {
+void carousel_left_step(int **main_mem, int **recv_buffer, size_t len, Processes procs) {
 
     MPI_Sendrecv(
         *main_mem, len, MPI_INT, prev(procs), 0, //send to previous
@@ -97,11 +98,31 @@ void carousel_left_step(int **main_mem, int **recv_buffer, int len, Processes pr
     swap_ptrs(main_mem, recv_buffer);
 }
 
+/***
+This program performs a parallel matrix multiplication using a ring
+topology. The matrixes have size n*n, and are generated randomly in
+a distributed manner across n processes. A process P_k generates the
+k-th row of matrix A and the k-th column of matrix B, and its goal
+is to compute the k-th column of the resulting matrix C.
+
+The rows of A are rotated left. The columns of B are static. This
+allows each process to compute elements of its column of C, increasing
+row by one each step. 
+
+Note on rows being rotated, and no columns. Assuming row-major embedding
+of the matrix A, the rows have elements next to each other in the memory.
+The sending of the row can then be done in a single call. This is relevant
+only for the first scattering (not yet implemented).
+
+Next steps:
+- Read matrix from file and scatter it across processes
+- Allow for different matrix sizes
+***/
 int main(int argc, char **argv) {
 
     Processes procs = init(argc, argv);
 
-    const int matrix_size = procs.size;
+    const size_t matrix_size = procs.size;
     int *rowA = (int*)malloc(matrix_size * sizeof(int));
     int *colB = (int*)malloc(matrix_size * sizeof(int));
     int *colC = (int*)malloc(matrix_size * sizeof(int));
@@ -110,12 +131,12 @@ int main(int argc, char **argv) {
     fill_rand(rowA, matrix_size);
     fill_rand(colB, matrix_size);
 
-    int row = procs.curr;
+    int row = procs.myrank;
     do {
-        colC[row] = compute_cell(colB, rowA, matrix_size);
+        colC[row] = compute_cell(rowA, colB, matrix_size);
         carousel_left_step(&rowA, &buffer, matrix_size, procs);
         row = (row + 1) % matrix_size;
-    } while (row != procs.curr);
+    } while (row != procs.myrank); // The carousel ends when the row returns to the original process
 
     chain_array_print("A", rowA, matrix_size, procs);
     chain_array_print("B", colB, matrix_size, procs);
